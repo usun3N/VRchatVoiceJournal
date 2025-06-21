@@ -79,13 +79,10 @@ def record_worker(result_queue: multiprocessing.Queue,
                     mic_mono = mic_stereo.mean(axis=1)
                     mic_np = np.repeat(mic_mono, 2).astype(np.int32)
                     
-
-                # 平和的ミキシング
                 mixed = (mic_np + vc_np) // 2
                 mixed = np.clip(mixed, -32768, 32767).astype(np.int16)
                 buffer.append(mixed.tobytes())
 
-                # (Command checkは変更なし)
                 try:
                     cmd = command_queue.get_nowait()
                     if cmd == "pause":
@@ -99,7 +96,6 @@ def record_worker(result_queue: multiprocessing.Queue,
                 except queue.Empty:
                     pass
             
-            # (WAV書き込み、result_queueへの送信は変更なし)
             with wave.open(file_path, "wb") as wf:
                 wf.setnchannels(CHANNELS)
                 wf.setsampwidth(pa.get_sample_size(FORMAT))
