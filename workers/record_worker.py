@@ -82,8 +82,9 @@ def record_worker(result_queue: multiprocessing.Queue,
                     mic_stereo = mic_np.reshape(-1, 2)
                     mic_mono = mic_stereo.mean(axis=1)
                     mic_np = np.repeat(mic_mono, 2).astype(np.int32)
-                    
-                mixed = (mic_np + vc_np) // 2
+                
+                gain = 0.8
+                mixed = (mic_np + vc_np) * gain
                 mixed = np.clip(mixed, -32768, 32767).astype(np.int16)
                 buffer.append(mixed.tobytes())
 
