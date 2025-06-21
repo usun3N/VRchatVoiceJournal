@@ -4,7 +4,6 @@ import queue
 import numpy as np
 from datetime import datetime, timezone
 import multiprocessing
-import os
 import uuid
 from pathlib import Path
 
