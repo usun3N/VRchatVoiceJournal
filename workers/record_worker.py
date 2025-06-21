@@ -68,8 +68,8 @@ def record_worker(result_queue: multiprocessing.Queue,
             file_path = os.path.join(dir_path, f"{file_name}.wav")
 
             for _ in range(int(RATE / CHUNK * RECORD_SECONDS)):
-                mic_data = mic_stream.read(CHUNK)
-                vc_data = vc_stream.read(CHUNK)
+                mic_data = mic_stream.read(CHUNK, exception_on_overflow=False)
+                vc_data = vc_stream.read(CHUNK, exception_on_overflow=False)
                 
                 mic_np = np.frombuffer(mic_data, dtype=np.int16).astype(np.int32)
                 vc_np = np.frombuffer(vc_data, dtype=np.int16).astype(np.int32)
