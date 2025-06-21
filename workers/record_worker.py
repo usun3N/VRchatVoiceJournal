@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import multiprocessing
 import os
 import uuid
+from pathlib import Path
 
 def record_worker(result_queue: multiprocessing.Queue,
                   command_queue: multiprocessing.Queue,
@@ -63,9 +64,12 @@ def record_worker(result_queue: multiprocessing.Queue,
             date = now.strftime("%Y-%m-%d")
             file_name = now.strftime("%Y-%m-%d_%H-%M-%S")
             timestamp = now.isoformat(timespec="milliseconds").replace("+00:00", "Z")
-            dir_path = os.path.join(base_dir, "data/audio", date)
-            os.makedirs(dir_path, exist_ok=True)
-            file_path = os.path.join(dir_path, f"{file_name}.wav")
+
+            base_path = Path(base_dir)
+            dir_path = base_path / "data" / "audio" / date
+            dir_path.mkdir(parents=True, exist_ok=True)
+
+            file_path = dir_path / f"{file_name}.wav"
 
             for _ in range(int(RATE / CHUNK * RECORD_SECONDS)):
                 mic_data = mic_stream.read(CHUNK, exception_on_overflow=False)
@@ -96,7 +100,7 @@ def record_worker(result_queue: multiprocessing.Queue,
                 except queue.Empty:
                     pass
             
-            with wave.open(file_path, "wb") as wf:
+            with wave.open(str(file_path), "wb") as wf:
                 wf.setnchannels(CHANNELS)
                 wf.setsampwidth(pa.get_sample_size(FORMAT))
                 wf.setframerate(RATE)
@@ -110,7 +114,7 @@ def record_worker(result_queue: multiprocessing.Queue,
                     "session_id": str(session_id),
                     "start_time": timestamp,
                     "length": length,
-                    "file_path": file_path
+                    "file_path": str(file_path)
                 }
             })
     except Exception as e:
