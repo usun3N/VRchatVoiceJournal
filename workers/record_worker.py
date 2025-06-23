@@ -43,19 +43,32 @@ def record_worker(result_queue: multiprocessing.Queue,
     
     pause = False
     recording = True
+    mic_mute = False
+    vc_mute = False
     try:
         while recording:
             if pause:
                 cmd = command_queue.get()
-                if cmd == "resume":
-                    result_queue.put({"event": "resume", "worker": "record_worker", "payload": {}})
-                    pause = False
-                elif cmd == "stop":
-                    recording = False
-                    result_queue.put({"event": "stop", "worker": "record_worker", "payload": {}})
-                    break
-                else:
-                    continue
+                match cmd:
+                    case "resume":
+                        pause = False
+                    case "stop":
+                        recording = False
+                        break
+                    case "mic_mute":
+                        mic_mute = True
+                        continue
+                    case "mic_unmute":
+                        mic_mute = False
+                        continue
+                    case "vc_mute":
+                        vc_mute = True
+                        continue
+                    case "vc_unmute":
+                        vc_mute = False
+                        continue
+                    case _:
+                        continue
 
             buffer = []
             session_id = uuid.uuid4()
@@ -71,8 +84,8 @@ def record_worker(result_queue: multiprocessing.Queue,
             file_path = dir_path / f"{file_name}.wav"
 
             for _ in range(int(RATE / CHUNK * RECORD_SECONDS)):
-                mic_data = mic_stream.read(CHUNK, exception_on_overflow=False)
-                vc_data = vc_stream.read(CHUNK, exception_on_overflow=False)
+                mic_data = mic_stream.read(CHUNK, exception_on_overflow=False) if not mic_mute else b"\x00" * CHUNK
+                vc_data = vc_stream.read(CHUNK, exception_on_overflow=False) if not vc_mute else b"\x00" * CHUNK
                 
                 mic_np = np.frombuffer(mic_data, dtype=np.int16).astype(np.int32)
                 vc_np = np.frombuffer(vc_data, dtype=np.int16).astype(np.int32)
@@ -89,14 +102,22 @@ def record_worker(result_queue: multiprocessing.Queue,
 
                 try:
                     cmd = command_queue.get_nowait()
-                    if cmd == "pause":
-                        pause = True
-                        result_queue.put({"event": "pause", "worker": "record_worker", "payload": {}})
-                        break
-                    elif cmd == "stop":
-                        recording = False
-                        result_queue.put({"event": "stop", "worker": "record_worker", "payload": {}})
-                        break
+                    match cmd:
+                        case "pause":
+                            pause = True
+                            break
+                        case "stop":
+                            recording = False
+                            break
+                        case "mic_mute":
+                            mic_mute = True
+                        case "mic_unmute":
+                            mic_mute = False
+                        case "vc_mute":
+                            vc_mute = True
+                        case "vc_unmute":
+                            vc_mute = False
+                    
                 except queue.Empty:
                     pass
             
