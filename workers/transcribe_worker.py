@@ -53,13 +53,24 @@ def transcribe_worker(result_queue: multiprocessing.Queue,
                 result = model.transcribe(file_path, language="ja", fp16=False) # fp16は環境に応じて調整
                 print(f"Transcription finished for {session_id}.")
                 
+                raw_segments: dict = result.get("segments", []) #type: ignore
+                
+                clean_segments = []
+                # 型を教えてあげた変数を使えば、VSCodeはもう文句を言わない
+                for segment in raw_segments:
+                    clean_segments.append({
+                        "start": segment.get("start", 0.0),
+                        "end": segment.get("end", 0.0),
+                        "text": segment.get("text", "").strip()
+                    })
+                
                 # 4. 完了報告をメインプロセスに送る
                 result_queue.put({
                     "event": "transcribe_done",
                     "worker": worker_name,
                     "payload": {
                         "session_id": session_id,
-                        "segments_json": result["segments"]
+                        "segments_json": clean_segments
                     }
                 })
 
