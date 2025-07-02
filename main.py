@@ -9,6 +9,7 @@ from typing import Dict, Any, Optional, Tuple
 import uuid
 
 # 外部ワーカーのインポート
+# workersフォルダが同じ階層にあることを想定
 from workers.record_worker import record_worker
 from workers.transcribe_worker import transcribe_worker
 from workers.metagen_worker import metagen_worker
@@ -20,7 +21,7 @@ def validate_config(config: Dict[str, Any]):
         raise KeyError("トップレベルの必須キーが不足しています。")
     if not all(k in config["record_worker"] for k in ["vc_device_index", "mic_device_index"]):
         raise KeyError("record_workerの必須キーが不足しています。")
-    if not all(k in config["transcribe_worker"] for k in ["model_size", "device", "wait_seconds_if_no_job"]):
+    if not all(k in config["transcribe_worker"] for k in ["model_size", "device", "compute_type", "wait_seconds_if_no_job"]):
         raise KeyError("transcribe_workerの必須キーが不足しています。")
     if not all(k in config["metagen_worker"] for k in ["api_key", "model_name", "wait_seconds_if_no_job"]):
         raise KeyError("metagen_workerの必須キーが不足しています。")
@@ -56,7 +57,7 @@ class DatabaseManager:
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS markers (
             id TEXT PRIMARY KEY, session_id TEXT NOT NULL, timestamp REAL NOT NULL,
-            label TEXT, category TEXT, FOREIGN KEY (session_id) REFERENCES recordings (id));
+            label TEXT, FOREIGN KEY (session_id) REFERENCES recordings (id));
         """)
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS tags (
@@ -97,7 +98,8 @@ class DatabaseManager:
         """, (Status.TRANSCRIBE_DONE.value,))
         return cursor.fetchone()
 
-    def handle_record_done(self, payload: Dict[str, Any]):
+    def handle_record_done(self, message: Dict[str, Any]):
+        payload = message.get('payload', {})
         session_id = payload.get('session_id')
         with self.conn:
             self.conn.execute(
@@ -105,14 +107,16 @@ class DatabaseManager:
                 (session_id, payload['start_time'], payload['length'], payload['file_path'], Status.PENDING.value)
             )
 
-    def handle_transcribe_done(self, payload: Dict[str, Any]):
+    def handle_transcribe_done(self, message: Dict[str, Any]):
+        payload = message.get('payload', {})
         session_id = payload.get('session_id', "")
         with self.conn:
             self.conn.execute("INSERT OR REPLACE INTO transcribes (id, segments_json) VALUES (?, ?)",
                               (session_id, json.dumps(payload['segments_json'])))
             self._update_status(session_id, Status.TRANSCRIBE_DONE)
 
-    def handle_meta_done(self, payload: Dict[str, Any]):
+    def handle_meta_done(self, message: Dict[str, Any]):
+        payload = message.get('payload', {})
         session_id = payload.get('session_id', "")
         markers = payload.get('markers', [])
         tags = payload.get('tags', [])
@@ -124,8 +128,8 @@ class DatabaseManager:
         with self.conn:
             for marker in markers:
                 self.conn.execute(
-                    "INSERT INTO markers (id, session_id, timestamp, label, category) VALUES (?, ?, ?, ?, ?)",
-                    (str(uuid.uuid4()), session_id, marker.get('time'), marker.get('content'), None)
+                    "INSERT INTO markers (id, session_id, timestamp, label) VALUES (?, ?, ?, ?)",
+                    (str(uuid.uuid4()), session_id, marker.get('time'), marker.get('content'))
                 )
             for tag_text in tags:
                 self.conn.execute(
@@ -135,7 +139,8 @@ class DatabaseManager:
             self._update_status(session_id, Status.META_DONE)
             print(f"✅ Metadata stored for session {session_id}.")
 
-    def handle_error(self, payload: Dict[str, Any]):
+    def handle_error(self, message: Dict[str, Any]):
+        payload = message.get('payload', {})
         session_id = payload.get('session_id')
         if session_id: self._update_status(session_id, Status.ERROR)
         print(f"🚨 [ERROR] from '{payload.get('worker')}': {payload.get('error_message')}")
@@ -155,8 +160,8 @@ class EventListener:
             'request_metagen_job': self.handle_meta_job_request,
         }
 
-    def handle_transcribe_job_request(self, payload: Dict[str, Any]):
-        worker_name = payload.get("worker", "")
+    def handle_transcribe_job_request(self, message: Dict[str, Any]):
+        worker_name = message.get("worker", "")
         command_queue = self.command_queues.get(worker_name)
         if not command_queue: return
 
@@ -171,8 +176,8 @@ class EventListener:
         else:
             command_queue.put({"task": "standby"})
 
-    def handle_meta_job_request(self, payload: Dict[str, Any]):
-        worker_name = payload.get("worker", "")
+    def handle_meta_job_request(self, message: Dict[str, Any]):
+        worker_name = message.get("worker", "")
         command_queue = self.command_queues.get(worker_name)
         if not command_queue: return
 
@@ -188,10 +193,15 @@ class EventListener:
                 })
             except json.JSONDecodeError as e:
                 print(f"🚨 [ERROR] Failed to decode segments_json for session {session_id}: {e}")
-                self.db_manager.handle_error({
-                    'worker': 'EventListener', 'session_id': session_id,
-                    'error_message': f"segments_jsonのデコードに失敗: {e}"
-                })
+                error_message = {
+                    "event": "error",
+                    "payload": {
+                        'worker': 'EventListener', 
+                        'session_id': session_id,
+                        'error_message': f"segments_jsonのデコードに失敗: {e}"
+                    }
+                }
+                self.db_manager.handle_error(error_message)
         else:
             command_queue.put({"task": "standby"})
 
@@ -205,7 +215,7 @@ class EventListener:
                     handler = self.event_handlers.get(event)
                     if handler:
                         try:
-                            handler(message.get('payload', {}))
+                            handler(message)
                         except Exception as e:
                             print(f"🚨 [ERROR] while handling '{event}': {e}")
                     else:
