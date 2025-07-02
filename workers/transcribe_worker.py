@@ -1,29 +1,28 @@
 import multiprocessing
 import time
-from queue import Empty
-import whisper
+from faster_whisper import WhisperModel
 
 def transcribe_worker(result_queue: multiprocessing.Queue,
                       command_queue: multiprocessing.Queue,
                       model_size: str,
                       device: str,
+                      compute_type: str,
                       wait_seconds: int):
     """
-    文字起こしタスクを処理するワーカープロセス。
+    文字起こしタスクを処理するワーカープロセス。(faster-whisper版)
     """
-    print(f"Transcribe worker started. Model: {model_size}, Device: {device}")
+    print(f"Transcribe worker started. Model: {model_size}, Device: {device}, ComputeType: {compute_type}")
     
-    # Whisperモデルを一度だけロードする
     try:
-        model = whisper.load_model(model_size, device=device)
-        print("Whisper model loaded successfully.")
+        # compute_type を指定して、最適化されたモデルをロードする
+        model = WhisperModel(model_size, device=device, compute_type=compute_type)
+        print("Faster-Whisper model loaded successfully.")
     except Exception as e:
-        print(f"[FATAL] Failed to load Whisper model: {e}")
-        # モデルロード失敗は致命的なので、エラーを通知して終了
+        print(f"[FATAL] Failed to load Faster-Whisper model: {e}")
         result_queue.put({
             "event": "error",
             "worker": "TranscribeWorker",
-            "payload": {"error_message": f"Whisperモデルのロードに失敗: {e}"}
+            "payload": {"error_message": f"Faster-Whisperモデルのロードに失敗: {e}"}
         })
         return
 
@@ -39,7 +38,7 @@ def transcribe_worker(result_queue: multiprocessing.Queue,
             })
 
             # 2. メインプロセスからの指令を待つ
-            command = command_queue.get() # ここではブロックして待つ
+            command = command_queue.get()
             task = command.get("task")
             payload = command.get("payload", {})
 
@@ -49,20 +48,20 @@ def transcribe_worker(result_queue: multiprocessing.Queue,
                 file_path = payload['file_path']
                 print(f"Received job: Transcribing {file_path}")
 
-                # Whisperで文字起こしを実行
-                result = model.transcribe(file_path, language="ja", fp16=False) # fp16は環境に応じて調整
-                print(f"Transcription finished for {session_id}.")
-                
-                raw_segments: dict = result.get("segments", []) #type: ignore
-                
+                # ▼▼▼ 文字起こし部分を faster-whisper に変更 ▼▼▼
+                segments_generator, info = model.transcribe(file_path, language="ja")
+                print(f"Detected language '{info.language}' with probability {info.language_probability}")
+
                 clean_segments = []
-                # 型を教えてあげた変数を使えば、VSCodeはもう文句を言わない
-                for segment in raw_segments:
+                # ジェネレータからセグメントを一つずつ取り出して処理する
+                for segment in segments_generator:
                     clean_segments.append({
-                        "start": segment.get("start", 0.0),
-                        "end": segment.get("end", 0.0),
-                        "text": segment.get("text", "").strip()
+                        "start": segment.start,
+                        "end": segment.end,
+                        "text": segment.text.strip()
                     })
+                
+                print(f"Transcription finished for {session_id}.")
                 
                 # 4. 完了報告をメインプロセスに送る
                 result_queue.put({
@@ -75,7 +74,6 @@ def transcribe_worker(result_queue: multiprocessing.Queue,
                 })
 
             elif task == "standby":
-                # 仕事がなかった場合、指定された時間だけ待機
                 print(f"No job found. Standing by for {wait_seconds} seconds...")
                 time.sleep(wait_seconds)
             
@@ -93,6 +91,4 @@ def transcribe_worker(result_queue: multiprocessing.Queue,
                 "worker": worker_name,
                 "payload": {"error_message": str(e)}
             })
-            # エラー発生後、少し待ってから次の仕事を探しに行く
             time.sleep(10)
-
