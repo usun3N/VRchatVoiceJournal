@@ -3,6 +3,7 @@ import wave
 import queue
 import numpy as np
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 import multiprocessing
 import uuid
 from pathlib import Path
@@ -17,7 +18,8 @@ def record_worker(result_queue: multiprocessing.Queue,
                   rate: int = 44100,
                   chunk: int = 1024,
                   record_seconds: int = 600,
-                  audio_format=pyaudio.paInt16):
+                  audio_format=pyaudio.paInt16,
+                  timezone_str: str = "Asia/Tokyo"):
     
     FORMAT = audio_format
     CHANNELS = channels
@@ -26,7 +28,9 @@ def record_worker(result_queue: multiprocessing.Queue,
     RECORD_SECONDS = record_seconds
 
     pa = pyaudio.PyAudio()
-
+    mic_name = pa.get_device_info_by_index(mic_device_index).get('name')
+    vc_name = pa.get_device_info_by_index(vc_device_index).get('name')
+    print(f"[RecordWorker] Recording started. Mic: {mic_name}, VC: {vc_name}")
     mic_stream = pa.open(format=FORMAT,
                          channels=CHANNELS,
                          rate=RATE,
@@ -48,41 +52,40 @@ def record_worker(result_queue: multiprocessing.Queue,
     try:
         while recording:
             if pause:
-                cmd = command_queue.get()
-                match cmd:
-                    case "resume":
-                        pause = False
-                    case "stop":
-                        recording = False
-                        break
-                    case "mic_mute":
-                        mic_mute = True
-                        continue
-                    case "mic_unmute":
-                        mic_mute = False
-                        continue
-                    case "vc_mute":
-                        vc_mute = True
-                        continue
-                    case "vc_unmute":
-                        vc_mute = False
-                        continue
-                    case _:
-                        continue
+                cmd_raw = command_queue.get()
+                cmd = cmd_raw.get("task")
+                print(f"[RecordWorker] Received command: {cmd}")
+                if cmd == "resume":
+                    pause = False
+                elif cmd == "stop":
+                    recording = False
+                    break
+                elif cmd == "mic_mute":
+                    mic_mute = True
+                    continue
+                elif cmd == "mic_unmute":
+                    mic_mute = False
+                    continue
+                elif cmd == "vc_mute":
+                    vc_mute = True
+                    continue
+                elif cmd == "vc_unmute":
+                    vc_mute = False
+                    continue
+                else:
+                    continue
 
             buffer = []
             session_id = uuid.uuid4()
-            now = datetime.now(timezone.utc)
+            now = datetime.now(tz=ZoneInfo(timezone_str))
             date = now.strftime("%Y-%m-%d")
             file_name = now.strftime("%Y-%m-%d_%H-%M-%S")
             timestamp = now.isoformat(timespec="milliseconds").replace("+00:00", "Z")
-
             base_path = Path(base_dir)
             dir_path = base_path / "data" / "audio" / date
             dir_path.mkdir(parents=True, exist_ok=True)
-
             file_path = dir_path / f"{file_name}.wav"
-
+            result_queue.put({"event": "record_started", "worker": "record_worker", "payload": {"session_id": str(session_id)}})
             for _ in range(int(RATE / CHUNK * RECORD_SECONDS)):
                 mic_data = mic_stream.read(CHUNK, exception_on_overflow=False) if not mic_mute else b"\x00" * CHUNK
                 vc_data = vc_stream.read(CHUNK, exception_on_overflow=False) if not vc_mute else b"\x00" * CHUNK
@@ -101,22 +104,24 @@ def record_worker(result_queue: multiprocessing.Queue,
                 buffer.append(mixed.tobytes())
 
                 try:
-                    cmd = command_queue.get_nowait()
-                    match cmd:
-                        case "pause":
-                            pause = True
-                            break
-                        case "stop":
-                            recording = False
-                            break
-                        case "mic_mute":
-                            mic_mute = True
-                        case "mic_unmute":
-                            mic_mute = False
-                        case "vc_mute":
-                            vc_mute = True
-                        case "vc_unmute":
-                            vc_mute = False
+                    cmd_raw = command_queue.get_nowait()
+                    cmd = cmd_raw.get("task")
+                    print(f"[RecordWorker] Received command: {cmd}")
+                    if cmd == "pause":
+                        result_queue.put({"event": "record_paused", "worker": "record_worker", "payload": {}})
+                        pause = True
+                        break
+                    elif cmd == "stop":
+                        recording = False
+                        break
+                    elif cmd == "mic_mute":
+                        mic_mute = True
+                    elif cmd == "mic_unmute":
+                        mic_mute = False
+                    elif cmd == "vc_mute":
+                        vc_mute = True
+                    elif cmd == "vc_unmute":
+                        vc_mute = False
                     
                 except queue.Empty:
                     pass
