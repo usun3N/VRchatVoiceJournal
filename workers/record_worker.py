@@ -14,7 +14,6 @@ def record_worker(result_queue: multiprocessing.Queue,
                   vc_device_index: int,
                   mic_device_index: int,
                   monoral_mic: bool = True,
-                  channels: int = 2,
                   rate: int = 44100,
                   chunk: int = 1024,
                   record_seconds: int = 600,
@@ -22,43 +21,51 @@ def record_worker(result_queue: multiprocessing.Queue,
                   timezone_str: str = "Asia/Tokyo"):
     
     FORMAT = audio_format
-    CHANNELS = channels
     RATE = rate
     CHUNK = chunk
     RECORD_SECONDS = record_seconds
 
     pa = pyaudio.PyAudio()
     mic_name = pa.get_device_info_by_index(mic_device_index).get('name')
+    mic_channels = int(pa.get_device_info_by_index(mic_device_index).get('maxInputChannels', 1))
     vc_name = pa.get_device_info_by_index(vc_device_index).get('name')
+    vc_channels = int(pa.get_device_info_by_index(vc_device_index).get('maxInputChannels', 1))
+    output_channels = 2  # 出力は必ずステレオ
     print(f"[RecordWorker] Recording started. Mic: {mic_name}, VC: {vc_name}")
     mic_stream = pa.open(format=FORMAT,
-                         channels=CHANNELS,
+                         channels=mic_channels,
                          rate=RATE,
                          input=True,
                          frames_per_buffer=CHUNK,
                          input_device_index=mic_device_index)
 
     vc_stream = pa.open(format=FORMAT,
-                        channels=CHANNELS,
+                        channels=vc_channels,
                         rate=RATE,
                         input=True,
                         frames_per_buffer=CHUNK,
                         input_device_index=vc_device_index)
     
+    bytes_per_sample = pa.get_sample_size(FORMAT)
+    mute_bytes = b"\x00" * (CHUNK * output_channels * bytes_per_sample)
     pause = False
     recording = True
     mic_mute = False
     vc_mute = False
+    worker_name = "RecordWorker-1"
     try:
         while recording:
             if pause:
+                result_queue.put({"event": "record_paused", "worker": worker_name, "payload": {}})
                 cmd_raw = command_queue.get()
                 cmd = cmd_raw.get("task")
                 print(f"[RecordWorker] Received command: {cmd}")
                 if cmd == "resume":
                     pause = False
+                    result_queue.put({"event": "record_resumed", "worker": worker_name, "payload": {}})
                 elif cmd == "stop":
                     recording = False
+                    result_queue.put({"event": "record_idle", "worker": worker_name, "payload": {}})
                     break
                 elif cmd == "mic_mute":
                     mic_mute = True
@@ -80,19 +87,27 @@ def record_worker(result_queue: multiprocessing.Queue,
             now = datetime.now(tz=ZoneInfo(timezone_str))
             date = now.strftime("%Y-%m-%d")
             file_name = now.strftime("%Y-%m-%d_%H-%M-%S")
-            timestamp = now.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+            import re
+            timestamp = re.sub(r"\+\d{2}:\d{2}$", "Z", now.isoformat(timespec="milliseconds"))
             base_path = Path(base_dir)
             dir_path = base_path / "data" / "audio" / date
             dir_path.mkdir(parents=True, exist_ok=True)
             file_path = dir_path / f"{file_name}.wav"
-            result_queue.put({"event": "record_started", "worker": "record_worker", "payload": {"session_id": str(session_id)}})
+            result_queue.put({"event": "record_started", "worker": worker_name, "payload": {"session_id": str(session_id)}})
             for _ in range(int(RATE / CHUNK * RECORD_SECONDS)):
-                mic_data = mic_stream.read(CHUNK, exception_on_overflow=False) if not mic_mute else b"\x00" * CHUNK
-                vc_data = vc_stream.read(CHUNK, exception_on_overflow=False) if not vc_mute else b"\x00" * CHUNK
+                mic_data = mic_stream.read(CHUNK, exception_on_overflow=False) if not mic_mute else mute_bytes
+                vc_data = vc_stream.read(CHUNK, exception_on_overflow=False) if not vc_mute else mute_bytes
                 
                 mic_np = np.frombuffer(mic_data, dtype=np.int16).astype(np.int32)
                 vc_np = np.frombuffer(vc_data, dtype=np.int16).astype(np.int32)
-                
+
+                # mic, vc どちらも必ず2chに変換
+                if mic_channels == 1:
+                    mic_np = np.repeat(mic_np, 2)
+                if vc_channels == 1:
+                    vc_np = np.repeat(vc_np, 2)
+
+                # monoral_mic処理は現状維持
                 if monoral_mic:
                     mic_stereo = mic_np.reshape(-1, 2)
                     mic_mono = mic_stereo.mean(axis=1)
@@ -108,11 +123,11 @@ def record_worker(result_queue: multiprocessing.Queue,
                     cmd = cmd_raw.get("task")
                     print(f"[RecordWorker] Received command: {cmd}")
                     if cmd == "pause":
-                        result_queue.put({"event": "record_paused", "worker": "record_worker", "payload": {}})
                         pause = True
                         break
                     elif cmd == "stop":
                         recording = False
+                        result_queue.put({"event": "record_idle", "worker": worker_name, "payload": {}})
                         break
                     elif cmd == "mic_mute":
                         mic_mute = True
@@ -127,7 +142,7 @@ def record_worker(result_queue: multiprocessing.Queue,
                     pass
             
             with wave.open(str(file_path), "wb") as wf:
-                wf.setnchannels(CHANNELS)
+                wf.setnchannels(output_channels)
                 wf.setsampwidth(pa.get_sample_size(FORMAT))
                 wf.setframerate(RATE)
                 wf.writeframes(b"".join(buffer))
@@ -135,7 +150,7 @@ def record_worker(result_queue: multiprocessing.Queue,
             length = len(buffer) * CHUNK / RATE
             result_queue.put({
                 "event": "record_done",
-                "worker": "record_worker",
+                "worker": worker_name,
                 "payload": {
                     "session_id": str(session_id),
                     "start_time": timestamp,
@@ -143,10 +158,11 @@ def record_worker(result_queue: multiprocessing.Queue,
                     "file_path": str(file_path)
                 }
             })
+            result_queue.put({"event": "record_idle", "worker": worker_name, "payload": {}})
     except Exception as e:
         result_queue.put({
             "event": "error",
-            "worker": "record_worker",
+            "worker": worker_name,
             "payload": {"error_message": str(e)}
         })
     finally:

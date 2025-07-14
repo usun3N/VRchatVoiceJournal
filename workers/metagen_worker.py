@@ -55,15 +55,14 @@ def metagen_worker(result_queue: multiprocessing.Queue,
     """
     print(f"Metagen worker started. Model: {model_name}")
 
+    worker_name = "MetaGenWorker-1"
     try:
         client = genai.Client(api_key=api_key)
 
     except Exception as e:
         print(f"[FATAL] Failed to configure Gemini model: {e}")
-        result_queue.put({"event": "error", "worker": "MetagenWorker", "payload": {"error_message": f"Geminiの設定に失敗: {e}"}})
+        result_queue.put({"event": "error", "worker": worker_name, "payload": {"error_message": f"Geminiの設定に失敗: {e}"}})
         return
-
-    worker_name = multiprocessing.current_process().name
 
     while True:
         try:
@@ -76,8 +75,7 @@ def metagen_worker(result_queue: multiprocessing.Queue,
             if task == "generate_meta":
                 session_id = payload['session_id']
                 segments = payload['segments_json']
-                print(f"Received job: Generating metadata for {session_id}")
-                
+                result_queue.put({"event": "meta_started", "worker": worker_name, "payload": {"session_id": session_id}})
                 transcript_text = format_transcript(segments)
                 prompt = generate_prompt(transcript_text)
 
@@ -101,16 +99,19 @@ def metagen_worker(result_queue: multiprocessing.Queue,
                         "tags": meta_data.tags
                     }
                 })
-
-                print(f"Metadata generation finished for {session_id}.")
+                result_queue.put({"event": "meta_idle", "worker": worker_name, "payload": {}})
 
             elif task == "standby":
+                result_queue.put({"event": "meta_idle", "worker": worker_name, "payload": {}})
                 print(f"No job for metadata. Standing by for {wait_seconds} seconds...")
                 time.sleep(wait_seconds)
 
             elif task == "stop":
+                result_queue.put({"event": "meta_idle", "worker": worker_name, "payload": {}})
                 print("Stop command received. Exiting worker.")
                 break
+            else:
+                result_queue.put({"event": "meta_idle", "worker": worker_name, "payload": {}})
 
         except Exception as e:
             print(f"[ERROR] An unexpected error occurred in metagen_worker: {e}")
