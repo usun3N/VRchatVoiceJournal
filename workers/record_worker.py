@@ -101,17 +101,47 @@ def record_worker(result_queue: multiprocessing.Queue,
                 mic_np = np.frombuffer(mic_data, dtype=np.int16).astype(np.int32)
                 vc_np = np.frombuffer(vc_data, dtype=np.int16).astype(np.int32)
 
-                # mic, vc どちらも必ず2chに変換
+                # 各チャンネルのサンプル数を計算
+                mic_samples_per_channel = len(mic_np) // mic_channels
+                vc_samples_per_channel = len(vc_np) // vc_channels
+                
+                # 最小のサンプル数に合わせる
+                min_samples = min(mic_samples_per_channel, vc_samples_per_channel)
+                
+                # データを適切な形状にリシェイプ
                 if mic_channels == 1:
+                    mic_np = mic_np[:min_samples]
                     mic_np = np.repeat(mic_np, 2)
+                else:
+                    mic_np = mic_np[:min_samples * mic_channels].reshape(-1, mic_channels)
+                    if mic_channels == 1:
+                        mic_np = np.repeat(mic_np, 2, axis=1)
+                    elif mic_channels > 2:
+                        # 2チャンネル以上の場合、最初の2チャンネルを使用
+                        mic_np = mic_np[:, :2]
+                
                 if vc_channels == 1:
+                    vc_np = vc_np[:min_samples]
                     vc_np = np.repeat(vc_np, 2)
+                else:
+                    vc_np = vc_np[:min_samples * vc_channels].reshape(-1, vc_channels)
+                    if vc_channels == 1:
+                        vc_np = np.repeat(vc_np, 2, axis=1)
+                    elif vc_channels > 2:
+                        # 2チャンネル以上の場合、最初の2チャンネルを使用
+                        vc_np = vc_np[:, :2]
 
-                # monoral_mic処理は現状維持
+                # monoral_mic処理
                 if monoral_mic:
-                    mic_stereo = mic_np.reshape(-1, 2)
-                    mic_mono = mic_stereo.mean(axis=1)
-                    mic_np = np.repeat(mic_mono, 2).astype(np.int32)
+                    mic_mono = mic_np.mean(axis=1)
+                    mic_np = np.repeat(mic_mono[:, np.newaxis], 2, axis=1)
+                
+                # 最終的な形状を確認してから混合
+                if mic_np.shape != vc_np.shape:
+                    # 形状が一致しない場合、小さい方に合わせる
+                    min_rows = min(mic_np.shape[0], vc_np.shape[0])
+                    mic_np = mic_np[:min_rows]
+                    vc_np = vc_np[:min_rows]
                 
                 gain = 0.8
                 mixed = (mic_np + vc_np) * gain
